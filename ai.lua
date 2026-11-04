@@ -41,13 +41,26 @@ local HexAI = {}
 
 -- Per-difficulty settings.
 --   playouts   MCTS iteration budget
---   max_time   wall-clock cap in seconds (os.clock), a safety net for slow
---              devices; the playout budget is what normally stops the search
+--   max_time   CPU-time cap in seconds (os.clock). On a fast machine the
+--              playout budget stops the search; on an e-reader (a Kobo runs
+--              this ~25x slower than a desktop) the cap does: Hard on 11x11
+--              reaches ~5 000 of its 20 000 playouts in 2.3 s there (plus
+--              the one-move win/block scan: ~2.5 s a move). It used to be
+--              8 s, i.e. an 8-second wait for every move.
+--   reuse      keep the search tree between moves: the subtree under the
+--              move actually played (ours, then the opponent's reply) still
+--              holds its playouts, so the next search starts with them
+--              instead of from nothing. Hard only -- the cut from 8 s to
+--              2.5 s on a Kobo is what it makes up for.
 HexAI.LEVELS = {
-    easy   = { playouts = 300,   max_time = 2.0, bridges = false },
-    medium = { playouts = 3000,  max_time = 4.0, bridges = true },
-    hard   = { playouts = 20000, max_time = 8.0, bridges = true },
+    easy   = { playouts = 300,   max_time = 1.0, bridges = false },
+    medium = { playouts = 3000,  max_time = 2.0, bridges = true },
+    hard   = { playouts = 20000, max_time = 2.3, bridges = true, reuse = true },
 }
+
+-- Multiplies every max_time; test harnesses set it to ~0.04 to reproduce on
+-- a desktop the playout counts a Kobo reaches in the same budget.
+HexAI.time_scale = 1
 
 -- ---------------------------------------------------------------------------
 -- Static tables per board size
@@ -57,13 +70,17 @@ local DELTAS = { { -1, 0 }, { -1, 1 }, { 0, -1 }, { 0, 1 }, { 1, -1 }, { 1, 0 } 
 
 -- Edge markers used in bridge tables in place of a cell index: a cell just
 -- off the top/bottom rows belongs to Black's edge, off the side columns to
--- White's. -BLACK / -WHITE so that "-q == player" reads as "q is my edge".
+-- White's. They are two virtual cells past the board, n*n + BLACK and
+-- n*n + WHITE, that the playout array permanently holds as a Black and a
+-- White stone: the bridge test then reads cells[p] the same way for a real
+-- cell and an edge, with no branch (branchy inner loops made LuaJIT fall
+-- back to the interpreter, which cost ~40% of the playout time).
 local function offBoardMarker(r, c, n)
     local off_r = r < 1 or r > n
     local off_c = c < 1 or c > n
     if off_r and off_c then return nil end
-    if off_r then return -BLACK end
-    if off_c then return -WHITE end
+    if off_r then return n * n + BLACK end
+    if off_c then return n * n + WHITE end
     return (r - 1) * n + c
 end
 
@@ -193,13 +210,10 @@ local function playout(cells, n, t, empt, pos, m, to_move, bridges)
             local cnt = 0
             for x = 1, #s, 3 do
                 local y = s[x]
-                if cells[y] == EMPTY then
-                    local p, q = s[x + 1], s[x + 2]
-                    if (cells[p] == to_move or -p == to_move)
-                       and (cells[q] == to_move or -q == to_move) then
+                if cells[y] == EMPTY and cells[s[x + 1]] == to_move
+                   and cells[s[x + 2]] == to_move then
                         cnt = cnt + 1
                         if cnt == 1 or random(cnt) == 1 then j = pos[y] end
-                    end
                 end
             end
         end
@@ -222,13 +236,23 @@ local EXPAND_AT = 3     -- visits of a move before it gets its own node
 local RAVE_K    = 600   -- visits at which RAVE and real stats weigh the same
 local EXPLORE   = 0.05
 
+local ok_tnew, tnew = pcall(require, "table.new")
+if not ok_tnew then tnew = function() return {} end end
+
 local function newNode(cells, nn, to_move)
-    local moves = {}
+    local m = 0
     for i = 1, nn do
-        if cells[i] == EMPTY then moves[#moves + 1] = i end
+        if cells[i] == EMPTY then m = m + 1 end
     end
-    local N, W, AN, AW = {}, {}, {}, {}
-    for k = 1, #moves do N[k], W[k], AN[k], AW[k] = 0, 0, 0, 0 end
+    local moves = tnew(m, 0)
+    local N, W, AN, AW = tnew(m, 0), tnew(m, 0), tnew(m, 0), tnew(m, 0)
+    m = 0
+    for i = 1, nn do
+        if cells[i] == EMPTY then
+            m = m + 1
+            moves[m], N[m], W[m], AN[m], AW[m] = i, 0, 0, 0, 0
+        end
+    end
     return { moves = moves, N = N, W = W, AN = AN, AW = AW, kids = {},
              total = 0, to_move = to_move }
 end
@@ -248,21 +272,70 @@ local function selectMove(node, rave_k, explore)
     return best
 end
 
+-- The tree of the last search with reuse on, and the position at its root.
+local last_tree = nil
+
+-- The node of the last tree for the position cells0 (to_move to play), or
+-- nil. Only stones added since are allowed: an undo, a swap or a new game
+-- changes or empties a cell, and the old tree no longer applies.
+local function reusableNode(cells0, nn, to_move)
+    local lt = last_tree
+    if not lt or lt.nn ~= nn then return nil end
+    local added = {}
+    for i = 1, nn do
+        local was, now = lt.cells[i], cells0[i]
+        if was ~= now then
+            if was ~= EMPTY then return nil end
+            added[i] = now
+        end
+    end
+    -- Walk down one stone at a time, each one the move of the node's side
+    -- to play; every step needs a subtree the last search already built.
+    local node, left = lt.root, 0
+    for _ in pairs(added) do left = left + 1 end
+    while left > 0 do
+        local nxt = nil
+        for k = 1, #node.moves do
+            local c = node.moves[k]
+            if added[c] == node.to_move then
+                nxt = node.kids[k]
+                added[c], left = nil, left - 1
+                break
+            end
+        end
+        if not nxt then return nil end
+        node = nxt
+    end
+    if node.to_move ~= to_move then return nil end
+    return node
+end
+
 -- Returns the chosen cell and the number of playouts run.
 function HexAI.mcts(cells0, n, to_move, opts)
     local t = getTables(n)
     local nn = n * n
     local budget   = opts.playouts or 2000
-    local deadline = clock() + (opts.max_time or 5)
+    local deadline = clock() + (opts.max_time or 5) * HexAI.time_scale
     local bridges  = opts.bridges ~= false
     local rave_k   = opts.rave_k or RAVE_K
     local explore  = opts.explore or EXPLORE
 
-    local root = newNode(cells0, nn, to_move)
+    local root = opts.reuse and reusableNode(cells0, nn, to_move) or nil
+    root = root or newNode(cells0, nn, to_move)
+    if opts.reuse then
+        local snap = {}
+        for i = 1, nn do snap[i] = cells0[i] end
+        last_tree = { nn = nn, cells = snap, root = root }
+    else
+        last_tree = nil
+    end
     if #root.moves == 0 then return nil, 0 end
     if #root.moves == 1 then return root.moves[1], 0 end
 
+    -- cells[nn + BLACK] / cells[nn + WHITE]: the virtual edge stones the
+    -- bridge tables point at (see offBoardMarker).
     local cells, empt, pos = {}, {}, {}
+    cells[nn + BLACK], cells[nn + WHITE] = BLACK, WHITE
     local path_nodes, path_k = {}, {}
     local iter = 0
     while iter < budget do

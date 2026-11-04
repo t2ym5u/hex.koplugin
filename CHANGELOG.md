@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-11-04
+
+### Changed
+- The computer answers in about 2.5 s at most on an e-reader, instead of up
+  to 8 s per move at Hard (4 s at Medium) on 11×11. On a Kobo, Hard now
+  thinks for at most 2.3 s, Medium 2 s, Easy 1 s.
+- Hard keeps what it worked out between moves (the analysis of the line
+  actually played), and its random playouts run ~10% faster, which wins back
+  part of the shorter thinking time. On a slow e-reader Hard on 11×11 is
+  weaker than before: it won 35 of 80 test games on 11×11 and 14 of 40 on
+  9×9 against the old 8-second version (Medium and 7×7 Hard: unchanged). On
+  a fast device, where the time cap is never reached, Hard is as strong as
+  before or slightly stronger.
+
 ## [1.0.3] - 2026-11-03
 
 ### Changed
