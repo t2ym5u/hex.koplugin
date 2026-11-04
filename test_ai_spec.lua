@@ -104,4 +104,49 @@ describe("HexAI", function()
         end
         assert.are.equal(6, wins)
     end)
+
+    it("keeps every move within its time cap (Kobo budget simulated)", function()
+        -- time_scale 0.04 stands for a device ~25x slower: the cap must
+        -- stop Hard on 11x11 well before its 20 000 playouts.
+        local saved = AI.time_scale
+        AI.time_scale = 0.04
+        math.randomseed(5)
+        local b = Board:new{ n = 11 }
+        local worst = 0
+        for _ = 1, 6 do
+            local t0 = os.clock()
+            local mv = AI.chooseMove(b, "hard")
+            worst = math.max(worst, os.clock() - t0)
+            assert.are.equal(Board.EMPTY, b.cells[mv.cell])
+            b:playIndex(mv.cell)
+        end
+        AI.time_scale = saved
+        -- 2.3 s x 0.04 = 92 ms of playouts, plus the win/block scan.
+        assert.is_true(worst < 0.25)
+    end)
+
+    it("reuses its tree only when the position follows from it", function()
+        -- Hard keeps its tree between moves; undo, new games and other
+        -- sizes must never make it answer with an occupied cell.
+        local saved = AI.time_scale
+        AI.time_scale = 0.01
+        math.randomseed(9)
+        for _, n in ipairs({ 7, 9, 7 }) do
+            local b = Board:new{ n = n }
+            for step = 1, 30 do
+                if b.status ~= "playing" then break end
+                local mv = AI.chooseMove(b, "hard")
+                if mv.swap then b:swap() else
+                    assert.are.equal(Board.EMPTY, b.cells[mv.cell])
+                    b:playIndex(mv.cell)
+                end
+                if step % 4 == 0 then b:undo() end
+                if b.status == "playing" and step % 3 == 0 then
+                    local e = b:emptyCells()
+                    b:playIndex(e[math.random(#e)])
+                end
+            end
+        end
+        AI.time_scale = saved
+    end)
 end)
