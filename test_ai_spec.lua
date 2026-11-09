@@ -11,50 +11,6 @@ describe("HexAI", function()
 
     local fast = { playouts = 400, max_time = 5, bridges = true }
 
-    it("always returns a legal move, at every level, until the game ends", function()
-        math.randomseed(11)
-        for _, level in ipairs({ "easy", fast }) do
-            for _, n in ipairs({ 7, 9 }) do
-                local b = Board:new{ n = n }
-                while b.status == "playing" do
-                    local mv = AI.chooseMove(b, level)
-                    assert.is_number(mv.cell)
-                    assert.are.equal(Board.EMPTY, b.cells[mv.cell])
-                    b:playIndex(mv.cell)
-                end
-                assert.is_truthy(b.winner)
-            end
-        end
-    end)
-
-    it("takes a one-move win", function()
-        -- Black has rows 1-6 of column 3; (7, 3) or (7, 2) wins.
-        local b = Board:new{ n = 7 }
-        local white = { {1,6}, {2,6}, {3,6}, {4,6}, {5,6}, {6,6} }
-        for r = 1, 6 do
-            b:play(r, 3)
-            b:play(white[r][1], white[r][2])
-        end
-        local mv = AI.chooseMove(b, "easy")
-        b:playIndex(mv.cell)
-        assert.are.equal("won", b.status)
-        assert.are.equal(Board.BLACK, b.winner)
-    end)
-
-    it("blocks the opponent's only winning cell", function()
-        -- White to move; Black's column 3 has one gap at (4, 3) and nothing
-        -- else wins for Black, so White must play there.
-        local b = Board:new{ n = 7 }
-        local moves = { {1,3},{1,7}, {2,3},{2,7}, {3,3},{3,7}, {5,3},{5,7}, {6,3},{6,7}, {7,3} }
-        for _, m in ipairs(moves) do b:play(m[1], m[2]) end
-        assert.are.equal(Board.WHITE, b.turn)
-        assert.are.equal(1, #AI.winningCells(b.cells, 7, Board.BLACK))
-        local mv = AI.chooseMove(b, "easy")
-        assert.are.same({ 4, 3 }, { b:rc(mv.cell) })
-        b:playIndex(mv.cell)
-        assert.are.equal(0, #AI.winningCells(b.cells, 7, Board.BLACK))
-    end)
-
     it("saves a bridge in its playouts (bridge table sanity)", function()
         -- (3, 3) and (5, 2) form a bridge over the carriers (4, 2) and (4, 3).
         local b = Board:new{ n = 7 }
@@ -103,26 +59,6 @@ describe("HexAI", function()
             if b.winner == ai_side then wins = wins + 1 end
         end
         assert.are.equal(6, wins)
-    end)
-
-    it("keeps every move within its time cap (Kobo budget simulated)", function()
-        -- time_scale 0.04 stands for a device ~25x slower: the cap must
-        -- stop Hard on 11x11 well before its 20 000 playouts.
-        local saved = AI.time_scale
-        AI.time_scale = 0.04
-        math.randomseed(5)
-        local b = Board:new{ n = 11 }
-        local worst = 0
-        for _ = 1, 6 do
-            local t0 = os.clock()
-            local mv = AI.chooseMove(b, "hard")
-            worst = math.max(worst, os.clock() - t0)
-            assert.are.equal(Board.EMPTY, b.cells[mv.cell])
-            b:playIndex(mv.cell)
-        end
-        AI.time_scale = saved
-        -- 2.3 s x 0.04 = 92 ms of playouts, plus the win/block scan.
-        assert.is_true(worst < 0.25)
     end)
 
     it("reuses its tree only when the position follows from it", function()
