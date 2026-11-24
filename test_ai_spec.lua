@@ -11,17 +11,31 @@ describe("HexAI", function()
 
     local fast = { playouts = 400, max_time = 5, bridges = true }
 
-    it("saves a bridge in its playouts (bridge table sanity)", function()
+    -- The bridge tables the playouts answer intrusions from. (This used to
+    -- ask MCTS to find the reply on a 7x7 board, but more playouts move away
+    -- from it -- 9/12 at 4 000, 0/12 at 80 000 -- so it was not the one good
+    -- move, and the test failed one run in two. 2026-11-24.)
+    it("lists a bridge's saving reply in its tables", function()
         -- (3, 3) and (5, 2) form a bridge over the carriers (4, 2) and (4, 3).
-        local b = Board:new{ n = 7 }
-        b:play(3, 3)            -- Black
-        b:play(1, 7)            -- White elsewhere
-        b:play(5, 2)            -- Black: bridge with (3, 3) via (4, 2), (4, 3)
-        b:play(4, 3)            -- White intrudes
-        -- The defending reply is (4, 2): a strong MCTS must find it.
-        local mv = AI.chooseMove(b, { playouts = 4000, max_time = 10, bridges = true })
-        local r, c = b:rc(mv.cell)
-        assert.are.same({ 4, 2 }, { r, c })
+        local n = 7
+        local idx = function(r, c) return (r - 1) * n + c end
+        local function hasSave(x, y, p, q)
+            local s = AI._getTables(n).saves[x]
+            for k = 1, #s, 3 do
+                if s[k] == y and ((s[k + 1] == p and s[k + 2] == q)
+                               or (s[k + 1] == q and s[k + 2] == p)) then
+                    return true
+                end
+            end
+            return false
+        end
+        -- White takes (4, 3): Black's answer is (4, 2), and back.
+        assert.is_true(hasSave(idx(4, 3), idx(4, 2), idx(3, 3), idx(5, 2)))
+        assert.is_true(hasSave(idx(4, 2), idx(4, 3), idx(3, 3), idx(5, 2)))
+        -- An edge template: (2, 3) to the top edge over (1, 3) and (1, 4).
+        assert.is_true(hasSave(idx(1, 3), idx(1, 4), idx(2, 3), n * n + 1))
+        -- Not a bridge: (4, 4) is not a carrier of this one.
+        assert.is_false(hasSave(idx(4, 4), idx(4, 2), idx(3, 3), idx(5, 2)))
     end)
 
     it("swaps a central opening and keeps an edge one", function()

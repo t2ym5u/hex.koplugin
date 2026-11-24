@@ -130,6 +130,9 @@ local function getTables(n)
     return t
 end
 
+-- For the specs only: the bridge tables of a board size.
+HexAI._getTables = getTables
+
 -- Does Black join row 1 to row n? On a full board "not Black" means White.
 local function blackConnects(cells, n, t)
     local stamp, stack, nbr = t.stamp, t.stack, t.nbr
